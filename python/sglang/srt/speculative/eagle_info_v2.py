@@ -89,6 +89,25 @@ class EagleDraftInputV2Mixin:
         # Now seq_lens is correct
         batch.maybe_wait_verify_done()
 
+        # Accumulate penalty
+        # This is a relaxed version of penalties for speculative decoding.
+        if batch.sampling_info.penalizer_orchestrator.is_required:
+            output_ids = torch.tensor(
+                [
+                    (
+                        req.output_ids[-1]
+                        if len(req.output_ids)
+                        else req.origin_input_ids[-1]
+                    )
+                    for req in batch.reqs
+                ],
+                dtype=torch.int64,
+                device=batch.device,
+            )
+            batch.sampling_info.penalizer_orchestrator.cumulate_output_tokens(
+                output_ids
+            )
+
         page_size = batch.token_to_kv_pool_allocator.page_size
         cur_kv_lens_cpu = []
         nxt_kv_lens_cpu = []
@@ -291,6 +310,22 @@ class EagleVerifyInputV2Mixin:
         sampling_info = batch.sampling_info
         next_token_logits = logits_output.next_token_logits
         device = batch.input_ids.device
+
+        # Apply penalty
+        # This is a relaxed version of penalties for speculative decoding.
+        if (
+            sampling_info.acc_linear_penalties is not None
+            or sampling_info.logit_bias is not None
+        ):
+            linear_penalty = torch.zeros(
+                (bs, next_token_logits.shape[1]),
+                dtype=torch.float32,
+                device=device,
+            )
+            sampling_info.apply_logits_bias(linear_penalty)
+            next_token_logits.add_(
+                torch.repeat_interleave(linear_penalty, self.draft_token_num, dim=0)
+            )
 
         # Apply grammar mask if provided
         if vocab_mask is not None:
